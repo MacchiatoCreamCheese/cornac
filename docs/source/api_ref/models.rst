@@ -11,6 +11,26 @@ Recommender (Generic Class)
 .. automodule:: cornac.models.recommender
    :members:
 
+Main-Auxiliary Network with Attentive Interactions (MAN)
+--------------------------------------------------------
+.. automodule:: cornac.models.man.recom_man
+   :members:
+
+A Capsule Network for Recommendation (CARP)
+-------------------------------------------
+.. automodule:: cornac.models.carp.recom_carp
+   :members:
+
+Dual Attention Mutual Learning between Ratings and Reviews (DAML)
+----------------------------------------------------------------
+.. automodule:: cornac.models.daml.recom_daml
+   :members:
+
+Aspect-Aware Latent Factor Model (ALFM)
+---------------------------------------
+.. automodule:: cornac.models.alfm.recom_alfm
+   :members:
+
 Comparative Aspects and Opinions Ranking for Recommendation Explanations (Companion)
 -------------------------------------------------------------------------
 .. automodule:: cornac.models.companion.recom_companion

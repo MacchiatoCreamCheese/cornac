@@ -44,6 +44,14 @@
 
 ### Text
 
+[alfm_example.py](alfm_example.py) - Aspect-Aware Latent Factor Model (ALFM) with Amazon Digital Music dataset.
+
+[carp_example.py](carp_example.py) - A Capsule Network for Recommendation (CARP) with Amazon Digital Music dataset.
+
+[daml_example.py](daml_example.py) - Dual Attention Mutual Learning (DAML) with Amazon Digital Music dataset.
+
+[man_example.py](man_example.py) - Main-Auxiliary Network with attentive interactions (MAN) with Amazon Digital Music dataset.
+
 [cdl_example.py](cdl_example.py) - Collaborative Deep Learning (CDL) with CiteULike dataset.
 
 [cdr_example.py](cdr_example.py) - Collaborative Deep Ranking (CDR) with CiteULike dataset.

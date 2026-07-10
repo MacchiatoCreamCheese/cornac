@@ -17,6 +17,7 @@ from .recommender import Recommender
 from .recommender import NextBasketRecommender
 from .recommender import NextItemRecommender
 
+from .alfm import ALFM
 from .amr import AMR
 from .ann import AnnoyANN
 from .ann import FaissANN
@@ -31,6 +32,7 @@ from .bpr import WBPR
 from .bpr import VEBPR
 from .causalrec import CausalRec
 from .c2pf import C2PF
+from .carp import CARP
 from .cdl import CDL
 from .cdr import CDR
 from .coe import COE
@@ -41,6 +43,7 @@ from .conv_mf import ConvMF
 from .ctr import CTR
 from .cvae import CVAE
 from .cvaecf import CVAECF
+from .daml import DAML
 from .dmrl import DMRL
 from .dnntsp import DNNTSP
 from .ease import EASE
@@ -60,6 +63,7 @@ from .knn import ItemKNN
 from .knn import UserKNN
 from .lightgcn import LightGCN
 from .lrppm import LRPPM
+from .man import MAN
 from .mcf import MCF
 from .mf import MF
 from .mmmf import MMMF
