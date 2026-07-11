@@ -13,6 +13,8 @@
 # limitations under the License.
 # ============================================================================
 
+import copy
+
 import numpy as np
 from tqdm.auto import trange
 
@@ -208,6 +210,23 @@ class DAML(Recommender):
         user_doc = torch.from_numpy(self.user_doc).to(self.device)
         item_doc = torch.from_numpy(self.item_doc).to(self.device)
 
+        def _val_mse():
+            self.model.eval()
+            se, n = 0.0, 0
+            with torch.no_grad():
+                for bu, bi, br in val_set.uir_iter(self.batch_size, shuffle=False):
+                    u = torch.from_numpy(bu).long().to(self.device)
+                    i = torch.from_numpy(bi).long().to(self.device)
+                    r = torch.from_numpy(br).float().to(self.device)
+                    pred = self.model(u, i, user_doc[u], item_doc[i])
+                    se += ((pred - r) ** 2).sum().item()
+                    n += len(br)
+            return se / max(n, 1)
+
+        # iRev-style model selection: run the full epoch budget, keep the
+        # checkpoint with the best validation MSE, restore it at the end.
+        best_val, best_state = float("inf"), None
+
         loop = trange(self.max_iter, disable=not self.verbose)
         for _ in loop:
             self.model.train()
@@ -228,9 +247,20 @@ class DAML(Recommender):
                 sum_loss += loss.item() * len(batch_r)
                 count += len(batch_r)
             scheduler.step()
+
+            postfix = {"loss": sum_loss / max(count, 1)}
+            if val_set is not None:
+                vmse = _val_mse()
+                if vmse < best_val:
+                    best_val, best_state = vmse, copy.deepcopy(self.model.state_dict())
+                postfix["val_mse"] = vmse
+                postfix["best_val"] = best_val
             if self.verbose:
-                loop.set_postfix(loss=sum_loss / max(count, 1))
+                loop.set_postfix(**postfix)
         loop.close()
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state)  # restore best-validation epoch
 
         if self.verbose:
             print("Learning completed!")

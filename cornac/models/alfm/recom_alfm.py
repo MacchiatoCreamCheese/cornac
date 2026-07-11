@@ -13,6 +13,8 @@
 # limitations under the License.
 # ============================================================================
 
+import copy
+
 import numpy as np
 from tqdm.auto import trange
 
@@ -112,6 +114,7 @@ class ALFM(Recommender):
     def _build_topics(self, train_set):
         """Fit an LDA model and return per-user / per-item topic matrices."""
         from sklearn.decomposition import LatentDirichletAllocation
+        from scipy.sparse import csr_matrix, vstack as sp_vstack
         from .w2v_utils import build_doc_matrices
 
         vocab = train_set.review_text.vocab
@@ -123,11 +126,16 @@ class ALFM(Recommender):
         )
 
         def _bow(doc_matrix):
-            counts = np.zeros((doc_matrix.shape[0], vocab.size), dtype="float32")
-            for row in range(doc_matrix.shape[0]):
-                np.add.at(counts[row], doc_matrix[row], 1.0)
-            counts[:, :4] = 0.0  # drop special tokens (<PAD>/<UNK>/<BOS>/<EOS>)
-            return counts
+            # Sparse bag-of-words: a dense (n x vocab) matrix would be huge
+            # (e.g. 77k x 50k float32 = 14 GB). Duplicate (row, col) entries are
+            # summed by csr_matrix, giving per-doc token counts.
+            n, _ = doc_matrix.shape
+            rows = np.repeat(np.arange(n), doc_matrix.shape[1])
+            cols = doc_matrix.ravel()
+            mask = cols >= 4  # drop special tokens (<PAD>/<UNK>/<BOS>/<EOS>)
+            rows, cols = rows[mask], cols[mask]
+            data = np.ones(cols.shape[0], dtype="float32")
+            return csr_matrix((data, (rows, cols)), shape=(n, vocab.size), dtype="float32")
 
         user_bow = _bow(user_doc)
         item_bow = _bow(item_doc)
@@ -138,7 +146,7 @@ class ALFM(Recommender):
             learning_method="online",
             random_state=self.seed,
         )
-        lda.fit(np.vstack([user_bow, item_bow]))
+        lda.fit(sp_vstack([user_bow, item_bow]))
         user_topics = lda.transform(user_bow).astype("float32")
         item_topics = lda.transform(item_bow).astype("float32")
         return user_topics, item_topics
@@ -179,9 +187,17 @@ class ALFM(Recommender):
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        if self.verbose:
-            print("[ALFM] fitting LDA topic model (%d topics)..." % self.n_topics)
-        self.user_topics, self.item_topics = self._build_topics(train_set)
+        # Reuse precomputed topics if provided (they only depend on the docs and
+        # n_topics, not on the swept params -- so a tuner can build them once per
+        # dataset via init_params instead of refitting LDA for every candidate).
+        cached_u = self.init_params.get("user_topics")
+        cached_i = self.init_params.get("item_topics")
+        if cached_u is not None and cached_i is not None:
+            self.user_topics, self.item_topics = cached_u, cached_i
+        else:
+            if self.verbose:
+                print("[ALFM] fitting LDA topic model (%d topics)..." % self.n_topics)
+            self.user_topics, self.item_topics = self._build_topics(train_set)
 
         self.model = ALFMModel(
             num_users=train_set.num_users,
@@ -201,6 +217,23 @@ class ALFM(Recommender):
 
         user_topics = torch.from_numpy(self.user_topics).to(self.device)
         item_topics = torch.from_numpy(self.item_topics).to(self.device)
+
+        def _val_mse():
+            self.model.eval()
+            se, n = 0.0, 0
+            with torch.no_grad():
+                for bu, bi, br in val_set.uir_iter(self.batch_size, shuffle=False):
+                    u = torch.from_numpy(bu).long().to(self.device)
+                    i = torch.from_numpy(bi).long().to(self.device)
+                    r = torch.from_numpy(br).float().to(self.device)
+                    pred = self.model(u, i, user_topics[u], item_topics[i])
+                    se += ((pred - r) ** 2).sum().item()
+                    n += len(br)
+            return se / max(n, 1)
+
+        # iRev-style model selection: run the full epoch budget, keep the
+        # checkpoint with the best validation MSE, restore it at the end.
+        best_val, best_state = float("inf"), None
 
         loop = trange(self.max_iter, disable=not self.verbose)
         for _ in loop:
@@ -222,9 +255,20 @@ class ALFM(Recommender):
                 sum_loss += loss.item() * len(batch_r)
                 count += len(batch_r)
             scheduler.step()
+
+            postfix = {"loss": sum_loss / max(count, 1)}
+            if val_set is not None:
+                vmse = _val_mse()
+                if vmse < best_val:
+                    best_val, best_state = vmse, copy.deepcopy(self.model.state_dict())
+                postfix["val_mse"] = vmse
+                postfix["best_val"] = best_val
             if self.verbose:
-                loop.set_postfix(loss=sum_loss / max(count, 1))
+                loop.set_postfix(**postfix)
         loop.close()
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state)  # restore best-validation epoch
 
         if self.verbose:
             print("Learning completed!")
