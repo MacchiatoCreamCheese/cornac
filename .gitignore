@@ -1,6 +1,8 @@
 tests/vocab.pkl
 .idea/
 .vscode/
+data/
+tuning/results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
