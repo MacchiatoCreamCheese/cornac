@@ -84,8 +84,8 @@ def tune_one(
     # Each fitted ATM (~15 min of Gibbs on a full dataset) is persisted to disk
     # immediately, so an interrupted sweep never recomputes finished topic models.
     if model_name == "ALFM":
-        order = dict(search_spaces.SPACES["ALFM"]["order"])
-        k_values = sorted(set(order.get("n_topics", [])) | {base.n_topics})
+        alfm_grid = dict(search_spaces.SPACES["ALFM"]["order"])
+        k_values = sorted(set(alfm_grid.get("n_topics", [])) | {base.n_topics})
         atm_dir = os.path.join(out_dir, "atm_cache")
         os.makedirs(atm_dir, exist_ok=True)
         print(f"  precomputing ATM for K in {k_values} (disk-cached in {atm_dir})...")

@@ -212,9 +212,10 @@ class CARP(Recommender):
             pad_id=vocab.size,
         )
 
-        # Word-embedding matrix (optional pretrained init).
+        # Word-embedding matrix (optional pretrained init). With no path, leave
+        # pretrained=None so the model random-inits like the official runner.
         pretrained = self.init_params.get("pretrained_word_embeddings")
-        if pretrained is None:
+        if pretrained is None and self.pretrained_w2v_path is not None:
             pretrained, n_oov = build_w2v_matrix(
                 vocab,
                 path=self.pretrained_w2v_path,
@@ -222,9 +223,7 @@ class CARP(Recommender):
                 word_dim=self.embedding_size,
                 seed=self.seed,
             )
-            if self.pretrained_w2v_path is None:
-                pretrained = None  # official runner random-inits embeddings
-            elif self.verbose:
+            if self.verbose:
                 print("[CARP] word embeddings: %d / %d OOV" % (n_oov, vocab.size))
 
         self.model = CARPModel(
@@ -334,6 +333,18 @@ class CARP(Recommender):
         if self.verbose:
             print("Learning completed!")
 
+    def _doc_tensors(self):
+        """Device copies of the doc/mask matrices, built once and reused across
+        score() calls (rating_eval calls score once per test user)."""
+        import torch
+
+        if getattr(self, "_doc_cache", None) is None:
+            self._doc_cache = tuple(
+                torch.from_numpy(arr).to(self.device)
+                for arr in (self.user_doc, self.item_doc, self.user_mask, self.item_mask)
+            )
+        return self._doc_cache
+
     def score(self, user_idx, item_idx=None):
         """Predict the scores/ratings of a user for an item (or all items).
 
@@ -357,10 +368,7 @@ class CARP(Recommender):
             raise ScoreException("Can't make score prediction for item %d" % item_idx)
 
         self.model.eval()
-        user_doc = torch.from_numpy(self.user_doc).to(self.device)
-        item_doc = torch.from_numpy(self.item_doc).to(self.device)
-        user_mask = torch.from_numpy(self.user_mask).to(self.device)
-        item_mask = torch.from_numpy(self.item_mask).to(self.device)
+        user_doc, item_doc, user_mask, item_mask = self._doc_tensors()
         with torch.no_grad():
             if item_idx is None:
                 n_items = self.item_doc.shape[0]
@@ -385,6 +393,7 @@ class CARP(Recommender):
         if save_dir is None:
             return
 
+        self._doc_cache = None  # don't pickle device tensors
         model = self.model
         device = self.device
         del self.model

@@ -264,18 +264,25 @@ class MAN(Recommender):
         )
         mse = torch.nn.MSELoss()
 
+        # Pre-build the validation batches ONCE: the RO/ORT stream assembly is a
+        # Python per-pair loop, and the val pairs never change across epochs.
+        val_batches = []
+        if val_set is not None:
+            for bu, bi, br in val_set.uir_iter(self.batch_size, shuffle=False):
+                u = torch.from_numpy(bu).long().to(self.device)
+                i = torch.from_numpy(bi).long().to(self.device)
+                r = torch.from_numpy(br).float().to(self.device)
+                ro, ort, _ = self._batch_tensors(bu, bi, self.device)
+                val_batches.append((u, i, r, ro, ort))
+
         def _val_mse():
             self.model.eval()
             se, n = 0.0, 0
             with torch.no_grad():
-                for bu, bi, br in val_set.uir_iter(self.batch_size, shuffle=False):
-                    u = torch.from_numpy(bu).long().to(self.device)
-                    i = torch.from_numpy(bi).long().to(self.device)
-                    r = torch.from_numpy(br).float().to(self.device)
-                    ro, ort, _ = self._batch_tensors(bu, bi, self.device)
+                for u, i, r, ro, ort in val_batches:
                     pred = self.model(u, i, ro, ort)
                     se += ((pred - r) ** 2).sum().item()
-                    n += len(br)
+                    n += len(r)
             return se / max(n, 1)
 
         best_val, best_state = float("inf"), None
