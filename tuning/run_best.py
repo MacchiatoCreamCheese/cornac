@@ -119,7 +119,25 @@ def main():
                     help="Output JSONL (default: tuning/results/best_run_<dataset>.jsonl).")
     ap.add_argument("--force", action="store_true", help="Re-run already-logged models.")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument(
+        "--set", default=None, metavar="K=V[,K=V]",
+        help="Override pick values for the models being run, e.g. --set batch_size=32. "
+        "Ints/floats parsed automatically. Use with a single --models entry.",
+    )
     args = ap.parse_args()
+
+    overrides = {}
+    if args.set:
+        for kv in args.set.split(","):
+            k, v = kv.split("=", 1)
+            try:
+                v = int(v)
+            except ValueError:
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass
+            overrides[k.strip()] = v
 
     from cornac.eval_methods import rating_eval
     from cornac.metrics import RMSE, MAE
@@ -154,7 +172,7 @@ def main():
             results.append(rec)
             continue
 
-        picks = BEST_PICKS[name]
+        picks = dict(BEST_PICKS[name], **overrides)
         print(f"\n=== {name}  epochs={args.epochs}  picks={picks} ===")
         base = search_spaces.build_base_model(
             name, max_iter=args.epochs, seed=args.seed, w2v_path=args.w2v,
