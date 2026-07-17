@@ -179,6 +179,7 @@ class ALFM(Recommender):
             float(self.eta[0]), float(self.eta[1]),
             int(self.tm_iterations), int(self.tm_begin_save), int(self.tm_save_step),
             int(maxW), np.uint64(self.seed if self.seed is not None else 88172645463325252),
+            1 if self.verbose else 0,
         )
         return {
             "theta_u": theta_u, "theta_v": theta_v,

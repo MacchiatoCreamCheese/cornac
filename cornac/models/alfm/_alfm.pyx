@@ -42,8 +42,14 @@ def run_atm(int num_users, int num_items, int A, int K, int V,
             int[::1] doc_sent_ptr, int[::1] sent_word_ptr, int[::1] words,
             double alpha, double beta, double gamma, double eta0, double eta1,
             int iterations, int begin_save, int save_step, int maxW,
-            unsigned long long seed):
-    """Run the ATM Gibbs sampler; return (thetaU, thetaV, lambdaU, lambdaV, pi)."""
+            unsigned long long seed, int verbose=0):
+    """Run the ATM Gibbs sampler; return (thetaU, thetaV, lambdaU, lambdaV, pi).
+
+    With ``verbose`` nonzero, prints per-iteration progress with elapsed time and
+    an ETA so long runs (minutes of Gibbs) are observable.
+    """
+    import time as _time
+    _t0 = _time.time()
     cdef int M = doc_user.shape[0]
     cdef int S = sent_word_ptr.shape[0] - 1
     cdef int nwords = words.shape[0]
@@ -141,6 +147,11 @@ def run_atm(int num_users, int num_items, int A, int K, int V,
 
     # ---- Gibbs iterations ----
     for i in range(iterations):
+        if verbose and i > 0:
+            _el = _time.time() - _t0
+            _eta = _el / i * (iterations - i)
+            print("  [ATM] iter %d/%d  elapsed %.0fs  eta %.0fs" % (i, iterations, _el, _eta),
+                  flush=True)
         if (i >= begin_save) and (((i - begin_save) % save_step) == 0):
             _estimate(num_users, num_items, A, K, V, alpha, beta, gamma,
                       eta0, eta1, alphaSum, gammaSum,
