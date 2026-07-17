@@ -16,7 +16,7 @@
 import copy
 
 import numpy as np
-from tqdm.auto import trange
+from tqdm.auto import tqdm
 
 from ..recommender import Recommender
 from ...exception import ScoreException
@@ -27,9 +27,11 @@ class DAML(Recommender):
 
     A review-based rating-prediction model that learns local word-level attention
     with a shared CNN, couples user and item document features through a mutual
-    (Euclidean) attention matrix, pools them with an unfold-based local pooling,
-    and predicts with a Latent Factor Model head. Ported to Cornac (PyTorch) from
-    the iRev benchmark implementation.
+    (Euclidean) attention matrix, and pools them with an unfold-based local pooling.
+    The review and id features are fused by addition per side (paper Eq. 15),
+    concatenated (Eq. 16), and scored with a Neural Factorization Machine head
+    (Eq. 17-19) -- the paper-faithful configuration (following the Neu-Review-Rec
+    reference), replacing the iRev benchmark's default concat + LFM head.
 
     Parameters
     ----------
@@ -227,8 +229,13 @@ class DAML(Recommender):
         # checkpoint with the best validation MSE, restore it at the end.
         best_val, best_state = float("inf"), None
 
-        loop = trange(self.max_iter, disable=not self.verbose)
-        for _ in loop:
+        desc = "DAML lr=%g do=%g id=%d wd=%g bs=%d" % (
+            self.learning_rate, self.dropout_rate, self.id_embedding_size,
+            self.weight_decay, self.batch_size,
+        )
+        n_batches = (train_set.num_ratings + self.batch_size - 1) // self.batch_size
+        pbar = tqdm(total=self.max_iter * n_batches, disable=not self.verbose, desc=desc)
+        for epoch in range(self.max_iter):
             self.model.train()
             sum_loss, count = 0.0, 0
             for batch_u, batch_i, batch_r in train_set.uir_iter(
@@ -246,18 +253,24 @@ class DAML(Recommender):
 
                 sum_loss += loss.item() * len(batch_r)
                 count += len(batch_r)
+                pbar.update(1)
+                pbar.set_postfix(
+                    ep=f"{epoch + 1}/{self.max_iter}",
+                    loss=f"{sum_loss / max(count, 1):.4f}",
+                )
             scheduler.step()
 
-            postfix = {"loss": sum_loss / max(count, 1)}
             if val_set is not None:
                 vmse = _val_mse()
                 if vmse < best_val:
                     best_val, best_state = vmse, copy.deepcopy(self.model.state_dict())
-                postfix["val_mse"] = vmse
-                postfix["best_val"] = best_val
-            if self.verbose:
-                loop.set_postfix(**postfix)
-        loop.close()
+                pbar.set_postfix(
+                    ep=f"{epoch + 1}/{self.max_iter}",
+                    loss=f"{sum_loss / max(count, 1):.4f}",
+                    val=f"{vmse:.4f}",
+                    best=f"{best_val:.4f}",
+                )
+        pbar.close()
 
         if best_state is not None:
             self.model.load_state_dict(best_state)  # restore best-validation epoch

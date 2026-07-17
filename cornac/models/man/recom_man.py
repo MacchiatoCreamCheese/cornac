@@ -16,22 +16,25 @@
 import copy
 
 import numpy as np
-from tqdm.auto import trange
+from tqdm.auto import tqdm
 
 from ..recommender import Recommender
 from ...exception import ScoreException
 
 
 class MAN(Recommender):
-    """Main-Auxiliary Network (MAN).
+    """Main-Auxiliary Network (MAN), faithful implementation from the paper.
 
-    A review-based rating-prediction model that shifts a user's multi-aspect
-    review features toward the item's most prominent aspect (Review Aspect Shift),
-    learns their interaction with CNNs and MLPs (Interaction-based Feature
-    Learning), fuses the result with id embeddings, and predicts with a Neural
-    Factorization Machine head. Ported to Cornac (PyTorch); only the paper's main
-    network (which produces the rating) is implemented -- the auxiliary network
-    only assists training and is not required for prediction.
+    MAN separates the review streams per (user, item) pair: the **main network**
+    processes RO (the user's reviews of other items) and ORT (other users' reviews
+    of the target item) through Review Aspect Shift + Interaction-based Feature
+    Learning + ID embeddings, producing predictive hidden features O. The
+    **auxiliary network** processes RT (the target review) through word-based
+    attention + multi-head self-attention + CNN/MLP + its own ID embeddings,
+    producing accurate hidden features O*. Training follows Algorithm 1's three
+    alternating steps: (J_A) fit the auxiliary net's rating head NFM2 on O*;
+    (J_B) distill the main net's O toward O*; (J_C) fit the main rating head NFM1
+    on O. Testing (Algorithm 2) uses the main network only.
 
     Parameters
     ----------
@@ -39,42 +42,56 @@ class MAN(Recommender):
         The name of the recommender model.
 
     embedding_size: int, default: 300
-        Word embedding size.
+        Word embedding size (paper uses 64-dim pretrained; 300 matches the
+        benchmark's shared GoogleNews vectors). Must be divisible by ``n_heads``.
 
     id_embedding_size: int, default: 32
-        User/item id embedding size.
+        User/item id embedding size (paper: latent feature dimension 32).
 
     n_filters: int, default: 100
-        Number of convolutional filters.
+        Number of convolutional filters (paper: 100).
 
     kernel_size: int, default: 3
-        Convolution window size.
+        Convolution window size (paper: 3).
 
-    fc_dim: int, default: 32
-        Dimension of the interaction features (gamma in the paper).
+    fc_dim: int, default: 50
+        Output dimension of the CNN text processor / interaction features
+        (gamma in the paper: 50).
 
-    max_doc_length: int, default: 500
-        Maximum number of tokens per user/item document.
+    att_hidden: int, default: 64
+        Hidden size of the word-based attention network (k in Eq. 18).
+
+    n_heads: int, default: 4
+        Number of self-attention heads (paper: 4).
+
+    ff_dim: int, default: 128
+        Feed-forward dimension of the self-attention encoder layer (paper: 128).
+
+    max_doc_length: int, default: 1000
+        Maximum tokens of the RO / ORT streams (paper Sec. 5.4: max input text
+        1,000 = 20 reviews x 50 words).
+
+    max_rt_length: int, default: 50
+        Maximum tokens of the RT stream (paper: single-review length 50).
 
     dropout_rate: float, default: 0.5
-        Dropout rate before the prediction head.
+        Dropout rate (paper: keep probability 0.5).
 
-    batch_size: int, default: 32
-        Batch size.
+    batch_size: int, default: 128
+        Batch size (paper: 128).
 
     max_iter: int, default: 10
-        Max number of training epochs.
+        Max number of training epochs (paper: best at 14-15).
 
-    learning_rate: float, default: 0.002
-        Learning rate for the Adam optimizer.
+    learning_rate: float, default: 0.006
+        Learning rate for the three Adam optimizers (paper: 0.006).
 
     weight_decay: float, default: 0.001
-        L2 weight decay for the Adam optimizer.
+        L2 regularization lambda (paper: 1e-3), applied via Adam weight decay.
 
     pretrained_w2v_path: str, optional, default: None
-        Path to a pretrained word2vec/GloVe/fastText file used to initialize the
-        word embeddings (iRev-faithful). If None, embeddings are randomly
-        initialized and a warning is emitted.
+        Path to a pretrained word2vec/GloVe/fastText file for the word embeddings
+        (held fixed during training). If None, embeddings are random and frozen.
 
     pretrained_w2v_type: str, {'word2vec', 'glove', 'fasttext'}, default: 'word2vec'
         Format of `pretrained_w2v_path`.
@@ -86,16 +103,16 @@ class MAN(Recommender):
         When True, running logs are displayed.
 
     init_params: dictionary, optional, default: None
-        Initial parameters, e.g., init_params={'pretrained_word_embeddings': <numpy array>}.
-        If provided, it takes precedence over `pretrained_w2v_path`.
+        e.g. init_params={'pretrained_word_embeddings': <numpy array>}.
 
     seed: int, optional, default: None
         Random seed for reproducibility.
 
     References
     ----------
-    * Yang, P., Yin, M., Cao, H., et al. (2023). MAN: Main-auxiliary network with
-      attentive interactions for review-based recommendation. Applied Intelligence.
+    * Yang, P., Xiao, Y., Zheng, W., Jiao, X., Zhu, K., Sun, C., & Liu, L. (2023).
+      MAN: Main-auxiliary network with attentive interactions for review-based
+      recommendation. Applied Intelligence 53:12955-12970.
     """
 
     def __init__(
@@ -105,12 +122,16 @@ class MAN(Recommender):
         id_embedding_size=32,
         n_filters=100,
         kernel_size=3,
-        fc_dim=32,
-        max_doc_length=500,
+        fc_dim=50,
+        att_hidden=64,
+        n_heads=4,
+        ff_dim=128,
+        max_doc_length=1000,
+        max_rt_length=50,
         dropout_rate=0.5,
-        batch_size=32,
+        batch_size=128,
         max_iter=10,
-        learning_rate=0.002,
+        learning_rate=0.006,
         weight_decay=0.001,
         pretrained_w2v_path=None,
         pretrained_w2v_type="word2vec",
@@ -125,7 +146,11 @@ class MAN(Recommender):
         self.n_filters = n_filters
         self.kernel_size = kernel_size
         self.fc_dim = fc_dim
+        self.att_hidden = att_hidden
+        self.n_heads = n_heads
+        self.ff_dim = ff_dim
         self.max_doc_length = max_doc_length
+        self.max_rt_length = max_rt_length
         self.dropout_rate = dropout_rate
         self.batch_size = batch_size
         self.max_iter = max_iter
@@ -162,10 +187,21 @@ class MAN(Recommender):
         self._fit_torch(train_set, val_set)
         return self
 
+    def _batch_tensors(self, u, i, device):
+        import torch
+
+        ro, ort, rt = self.streams.build_batch(u, i)
+        return (
+            torch.from_numpy(ro).to(device),
+            torch.from_numpy(ort).to(device),
+            torch.from_numpy(rt).to(device),
+        )
+
     def _fit_torch(self, train_set, val_set):
         import torch
         from .man import MANModel
-        from .w2v_utils import build_w2v_matrix, build_doc_matrices
+        from .man_data import ReviewStreams
+        from .w2v_utils import build_w2v_matrix
 
         if self.seed is not None:
             torch.manual_seed(self.seed)
@@ -175,15 +211,12 @@ class MAN(Recommender):
 
         vocab = train_set.review_text.vocab
         self.vocab_size = vocab.size
-        self.user_doc, self.item_doc = build_doc_matrices(
-            train_set.review_text,
-            train_set.num_users,
-            train_set.num_items,
-            self.max_doc_length,
+        self.streams = ReviewStreams(
+            train_set.review_text, self.max_doc_length, self.max_rt_length
         )
 
         pretrained = self.init_params.get("pretrained_word_embeddings")
-        if pretrained is None:
+        if pretrained is None and self.pretrained_w2v_path is not None:
             pretrained, n_oov = build_w2v_matrix(
                 vocab,
                 path=self.pretrained_w2v_path,
@@ -191,7 +224,7 @@ class MAN(Recommender):
                 word_dim=self.embedding_size,
                 seed=self.seed,
             )
-            if self.verbose and self.pretrained_w2v_path is not None:
+            if self.verbose:
                 print("[MAN] word embeddings: %d / %d OOV" % (n_oov, vocab.size))
 
         self.model = MANModel(
@@ -203,20 +236,33 @@ class MAN(Recommender):
             n_filters=self.n_filters,
             kernel_size=self.kernel_size,
             fc_dim=self.fc_dim,
+            att_hidden=self.att_hidden,
+            n_heads=self.n_heads,
+            ff_dim=self.ff_dim,
             dropout_rate=self.dropout_rate,
             pretrained_word_embeddings=pretrained,
         ).to(self.device)
 
-        optimizer = torch.optim.Adam(
-            self.model.parameters(),
-            lr=self.learning_rate,
-            weight_decay=self.weight_decay,
-        )
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.8)
-        criterion = torch.nn.MSELoss()
+        # Three optimizers over disjoint parameter groups (Algorithm 1):
+        # theta_A = auxiliary net + NFM2; theta_B = main feature extractor;
+        # theta_C = NFM1. L2 regularization lambda via Adam weight decay.
+        # The shared word-embedding table is frozen (paper Eq. 1) and excluded.
+        def _trainable(*modules):
+            return [p for md in modules for p in md.parameters() if p.requires_grad]
 
-        user_doc = torch.from_numpy(self.user_doc).to(self.device)
-        item_doc = torch.from_numpy(self.item_doc).to(self.device)
+        opt_aux = torch.optim.Adam(
+            _trainable(self.model.aux_net, self.model.nfm2),
+            lr=self.learning_rate, weight_decay=self.weight_decay,
+        )
+        opt_main = torch.optim.Adam(
+            _trainable(self.model.main_net),
+            lr=self.learning_rate, weight_decay=self.weight_decay,
+        )
+        opt_nfm1 = torch.optim.Adam(
+            _trainable(self.model.nfm1),
+            lr=self.learning_rate, weight_decay=self.weight_decay,
+        )
+        mse = torch.nn.MSELoss()
 
         def _val_mse():
             self.model.eval()
@@ -226,46 +272,77 @@ class MAN(Recommender):
                     u = torch.from_numpy(bu).long().to(self.device)
                     i = torch.from_numpy(bi).long().to(self.device)
                     r = torch.from_numpy(br).float().to(self.device)
-                    pred = self.model(u, i, user_doc[u], item_doc[i])
+                    ro, ort, _ = self._batch_tensors(bu, bi, self.device)
+                    pred = self.model(u, i, ro, ort)
                     se += ((pred - r) ** 2).sum().item()
                     n += len(br)
             return se / max(n, 1)
 
-        # iRev-style model selection: run the full epoch budget, keep the
-        # checkpoint with the best validation MSE, restore it at the end.
         best_val, best_state = float("inf"), None
 
-        loop = trange(self.max_iter, disable=not self.verbose)
-        for _ in loop:
+        desc = "MAN lr=%g wd=%g bs=%d" % (
+            self.learning_rate, self.weight_decay, self.batch_size,
+        )
+        n_batches = (train_set.num_ratings + self.batch_size - 1) // self.batch_size
+        pbar = tqdm(total=self.max_iter * n_batches, disable=not self.verbose, desc=desc)
+        for epoch in range(self.max_iter):
             self.model.train()
-            sum_loss, count = 0.0, 0
+            sum_a, sum_b, sum_c, count = 0.0, 0.0, 0.0, 0
             for batch_u, batch_i, batch_r in train_set.uir_iter(
                 self.batch_size, shuffle=True
             ):
                 u = torch.from_numpy(batch_u).long().to(self.device)
                 i = torch.from_numpy(batch_i).long().to(self.device)
                 r = torch.from_numpy(batch_r).float().to(self.device)
+                ro, ort, rt = self._batch_tensors(batch_u, batch_i, self.device)
 
-                optimizer.zero_grad()
-                pred = self.model(u, i, user_doc[u], item_doc[i])
-                loss = criterion(pred, r)
-                loss.backward()
-                optimizer.step()
+                # ---- Step 1 (J_A): train the auxiliary network on RT. ----
+                opt_aux.zero_grad()
+                o_star = self.model.aux_net(u, i, rt)
+                loss_a = mse(self.model.nfm2(o_star).squeeze(1), r)
+                loss_a.backward()
+                opt_aux.step()
 
-                sum_loss += loss.item() * len(batch_r)
-                count += len(batch_r)
-            scheduler.step()
+                # ---- Step 2 (J_B): distill O toward the (updated) O*. ----
+                with torch.no_grad():
+                    o_star_label = self.model.aux_net(u, i, rt)
+                opt_main.zero_grad()
+                o = self.model.main_net(u, i, ro, ort)
+                loss_b = mse(o, o_star_label)
+                loss_b.backward()
+                opt_main.step()
 
-            postfix = {"loss": sum_loss / max(count, 1)}
+                # ---- Step 3 (J_C): train NFM1 on the (detached) O. ----
+                opt_nfm1.zero_grad()
+                pred = self.model.nfm1(o.detach()).squeeze(1)
+                loss_c = mse(pred, r)
+                loss_c.backward()
+                opt_nfm1.step()
+
+                bs = len(batch_r)
+                sum_a += loss_a.item() * bs
+                sum_b += loss_b.item() * bs
+                sum_c += loss_c.item() * bs
+                count += bs
+                pbar.update(1)
+                pbar.set_postfix(
+                    ep=f"{epoch + 1}/{self.max_iter}",
+                    JA=f"{sum_a / max(count, 1):.3f}",
+                    JB=f"{sum_b / max(count, 1):.3f}",
+                    JC=f"{sum_c / max(count, 1):.3f}",
+                )
+
             if val_set is not None:
                 vmse = _val_mse()
                 if vmse < best_val:
                     best_val, best_state = vmse, copy.deepcopy(self.model.state_dict())
-                postfix["val_mse"] = vmse
-                postfix["best_val"] = best_val
-            if self.verbose:
-                loop.set_postfix(**postfix)
-        loop.close()
+                pbar.set_postfix(
+                    ep=f"{epoch + 1}/{self.max_iter}",
+                    JC=f"{sum_c / max(count, 1):.3f}",
+                    val=f"{vmse:.4f}",
+                    best=f"{best_val:.4f}",
+                )
+        pbar.close()
 
         if best_state is not None:
             self.model.load_state_dict(best_state)  # restore best-validation epoch
@@ -274,7 +351,9 @@ class MAN(Recommender):
             print("Learning completed!")
 
     def score(self, user_idx, item_idx=None):
-        """Predict the scores/ratings of a user for an item (or all items)."""
+        """Predict the scores/ratings of a user for an item (or all items).
+
+        Uses the main network only (Algorithm 2)."""
         import torch
 
         if self.is_unknown_user(user_idx):
@@ -283,26 +362,26 @@ class MAN(Recommender):
             raise ScoreException("Can't make score prediction for item %d" % item_idx)
 
         self.model.eval()
-        user_doc = torch.from_numpy(self.user_doc).to(self.device)
-        item_doc = torch.from_numpy(self.item_doc).to(self.device)
         with torch.no_grad():
             if item_idx is None:
-                n_items = self.item_doc.shape[0]
-                u = torch.full((n_items,), user_idx, dtype=torch.long, device=self.device)
-                i = torch.arange(n_items, dtype=torch.long, device=self.device)
+                n_items = self.num_items
                 preds = []
                 for start in range(0, n_items, self.batch_size):
                     end = min(start + self.batch_size, n_items)
-                    bu, bi = u[start:end], i[start:end]
-                    preds.append(
-                        self.model(bu, bi, user_doc[bu], item_doc[bi]).cpu().numpy()
-                    )
+                    bu = np.full(end - start, user_idx, dtype=np.int64)
+                    bi = np.arange(start, end, dtype=np.int64)
+                    u = torch.from_numpy(bu).to(self.device)
+                    i = torch.from_numpy(bi).to(self.device)
+                    ro, ort, _ = self._batch_tensors(bu, bi, self.device)
+                    preds.append(self.model(u, i, ro, ort).cpu().numpy())
                 return np.concatenate(preds).ravel()
             else:
-                u = torch.tensor([user_idx], dtype=torch.long, device=self.device)
-                i = torch.tensor([item_idx], dtype=torch.long, device=self.device)
-                pred = self.model(u, i, user_doc[u], item_doc[i])
-                return pred.item()
+                bu = np.array([user_idx], dtype=np.int64)
+                bi = np.array([item_idx], dtype=np.int64)
+                u = torch.from_numpy(bu).to(self.device)
+                i = torch.from_numpy(bi).to(self.device)
+                ro, ort, _ = self._batch_tensors(bu, bi, self.device)
+                return self.model(u, i, ro, ort).item()
 
     def save(self, save_dir=None, save_trainset=False):
         """Save the model to the filesystem (state dict saved separately)."""
@@ -340,6 +419,9 @@ class MAN(Recommender):
             n_filters=model.n_filters,
             kernel_size=model.kernel_size,
             fc_dim=model.fc_dim,
+            att_hidden=model.att_hidden,
+            n_heads=model.n_heads,
+            ff_dim=model.ff_dim,
             dropout_rate=model.dropout_rate,
         )
         net.load_state_dict(torch.load(model.load_from.replace(".pkl", ".pt")))

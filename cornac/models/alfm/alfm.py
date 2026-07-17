@@ -12,93 +12,74 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ============================================================================
-"""PyTorch network for ALFM.
+"""NumPy prediction math for the faithful ALFM (aspect-aware latent factor model).
 
-Ported from the iRev benchmark implementation of
+Rating (MFRecommender.predict):
+    r(u,i) = sum_a topicPart(u,i,a) * sum_f w[a,f]^2 * U[u,f] * V[i,f]
+             + b_u + b_i + mean
+with topicPart(u,i,a) = (pi_u*lambdaU[u,a] + (1-pi_u)*lambdaV[i,a]) * (1 - JSD(thetaU[u,a], thetaV[i,a])).
 
-    Cheng, Z., Ding, Y., Zhu, L., & Kankanhalli, M. (2018).
-    Aspect-Aware Latent Factor Model: Rating Prediction with Ratings and Reviews.
-    WWW 2018.
-
-ALFM represents each user/item review document by a topic (aspect) distribution
-obtained from an LDA model (computed in the recommender). The network fuses these
-topic vectors with id embeddings, applies an attentive interaction, and predicts
-the rating directly. Ported to be self-contained within Cornac.
+Because the topic model smooths every distribution with the Dirichlet prior alpha,
+all thetaU/thetaV entries are strictly positive, so the exact ``KLDis`` edge cases in
+getTopicPartFactor.java (u_k==0 skip / v_k==0 -> big) never fire and the plain
+base-2 Jensen-Shannon divergence used here is numerically identical.
 """
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import numpy as np
 
 
-class ALFMModel(nn.Module):
-    def __init__(
-        self,
-        num_users,
-        num_items,
-        topic_dim,
-        id_embedding_size=32,
-        dropout_rate=0.5,
-    ):
-        super().__init__()
+def _jsd_sim(ta, tb):
+    """1 - JSD(ta, tb) with base-2 log, broadcast over the leading axes (last axis = K)."""
+    m = 0.5 * (ta + tb)
+    kl1 = np.sum(ta * np.log2(ta / m), axis=-1)
+    kl2 = np.sum(tb * np.log2(tb / m), axis=-1)
+    return 1.0 - 0.5 * (kl1 + kl2)
 
-        self.user_embedding = nn.Embedding(num_users, id_embedding_size)
-        self.item_embedding = nn.Embedding(num_items, id_embedding_size)
 
-        # Project the LDA topic vector into the id-embedding space (identity-like
-        # when topic_dim == id_embedding_size, mirroring iRev's direct addition).
-        self.user_topic_fc = nn.Linear(topic_dim, id_embedding_size)
-        self.item_topic_fc = nn.Linear(topic_dim, id_embedding_size)
+def topic_part_batch(u_idx, i_idx, pi, lambda_u, lambda_v, theta_u, theta_v):
+    """Per-rating topicPart, shape (N, A). u_idx/i_idx are int arrays of length N."""
+    tu = theta_u[u_idx]  # (N, A, K)
+    tv = theta_v[i_idx]  # (N, A, K)
+    s = _jsd_sim(tu, tv)  # (N, A)
+    p = pi[u_idx][:, None]  # (N, 1)
+    ratio = p * lambda_u[u_idx] + (1.0 - p) * lambda_v[i_idx]  # (N, A)
+    return ratio * s
 
-        self.user_fusion = nn.Sequential(
-            nn.Linear(id_embedding_size, id_embedding_size), nn.ReLU()
-        )
-        self.item_fusion = nn.Sequential(
-            nn.Linear(id_embedding_size, id_embedding_size), nn.ReLU()
-        )
 
-        self.att_layer1 = nn.Sequential(nn.Linear(2 * id_embedding_size, 1), nn.ReLU())
-        self.att_layer2 = nn.Linear(1, id_embedding_size, bias=False)
+def topic_part_user_items(u, pi, lambda_u, lambda_v, theta_u, theta_v):
+    """topicPart of user ``u`` against ALL items, shape (num_items, A)."""
+    tu = theta_u[u][None, :, :]  # (1, A, K)
+    s = _jsd_sim(tu, theta_v)  # (num_items, A)
+    ratio = pi[u] * lambda_u[u][None, :] + (1.0 - pi[u]) * lambda_v  # (num_items, A)
+    return ratio * s
 
-        self.rating_predict = nn.Sequential(
-            nn.Linear(id_embedding_size, id_embedding_size),
-            nn.ReLU(),
-            nn.Dropout(p=dropout_rate),
-            nn.Linear(id_embedding_size, 1),
-        )
 
-        self.reset_parameters()
+def predict_user_items(u, params):
+    """Predict ratings of user ``u`` for all items, shape (num_items,)."""
+    tp = topic_part_user_items(
+        u, params["pi"], params["lambda_u"], params["lambda_v"],
+        params["theta_u"], params["theta_v"],
+    )  # (I, A)
+    w2 = params["w"] ** 2  # (A, F)
+    uf = params["user_factors"][u]  # (F,)
+    coeff = w2 * uf[None, :]  # (A, F)
+    # einsum (not '@'): avoids a BLAS matmul that can crash under some Windows
+    # numpy/threading setups; aspect_rate[i,a] = sum_f item_factors[i,f]*coeff[a,f].
+    aspect_rate = np.einsum("if,af->ia", params["item_factors"], coeff)  # (I, A)
+    pred = np.sum(tp * aspect_rate, axis=1)
+    pred += params["user_bias"][u] + params["item_bias"] + params["mean"]
+    return pred
 
-    def reset_parameters(self):
-        for emb in [self.user_embedding, self.item_embedding]:
-            nn.init.xavier_uniform_(emb.weight)
-        for fc in [
-            self.user_topic_fc,
-            self.item_topic_fc,
-            self.user_fusion[0],
-            self.item_fusion[0],
-            self.att_layer1[0],
-            self.att_layer2,
-            self.rating_predict[0],
-            self.rating_predict[3],
-        ]:
-            nn.init.uniform_(fc.weight, -0.1, 0.1)
-            if fc.bias is not None:
-                nn.init.constant_(fc.bias, 0.1)
 
-    def forward(self, uids, iids, user_topic, item_topic):
-        user_id_embed = self.user_embedding(uids)
-        item_id_embed = self.item_embedding(iids)
-
-        user_embed = user_id_embed + self.user_topic_fc(user_topic)
-        item_embed = item_id_embed + self.item_topic_fc(item_topic)
-        user_embed = self.user_fusion(user_embed)
-        item_embed = self.item_fusion(item_embed)
-
-        feature_all = torch.cat((user_embed, item_embed), dim=-1)
-        att_weights = self.att_layer2(self.att_layer1(feature_all))
-        att_weights = F.softmax(att_weights, dim=-1)
-
-        interact = att_weights * user_embed * item_embed
-        prediction = self.rating_predict(interact)
-        return prediction.squeeze(1)
+def predict_single(u, i, params):
+    """Predict the rating of user ``u`` for item ``i`` (scalar)."""
+    tu = params["theta_u"][u]  # (A, K)
+    tv = params["theta_v"][i]  # (A, K)
+    s = _jsd_sim(tu, tv)  # (A,)
+    ratio = params["pi"][u] * params["lambda_u"][u] + (1.0 - params["pi"][u]) * params["lambda_v"][i]
+    tp = ratio * s  # (A,)
+    w2 = params["w"] ** 2  # (A, F)
+    aspect_rate = np.sum(w2 * params["user_factors"][u][None, :] * params["item_factors"][i][None, :], axis=1)
+    pred = float(np.sum(tp * aspect_rate))
+    pred += params["user_bias"][u] + params["item_bias"][i] + params["mean"]
+    return pred

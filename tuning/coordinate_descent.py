@@ -64,22 +64,35 @@ def run_cd(base_model, order, defaults, eval_method, cache_path, verbose=True):
     cache = _load_cache(cache_path)
     rmse = RMSE()
 
+    # Upper bound on the number of NEW fits (the locked/default value in each sweep
+    # is a cache hit): baseline + sum(len(values) - 1).
+    n_fits_max = 1 + sum(max(len(v) - 1, 0) for _, v in order)
+    counters = {"done": 0, "fit": 0, "t_fit": 0.0}
+    t_start = time.time()
+
     def evaluate(params):
         k = _key(params)
+        counters["done"] += 1
         if k in cache:
             if verbose:
-                print(f"    [cache] {params} -> RMSE={cache[k]:.4f}")
+                print(f"      cache-hit  RMSE={cache[k]:.4f}   {params}")
             return cache[k], True
+        counters["fit"] += 1
         t0 = time.time()
         model = base_model.clone(params).fit(
             eval_method.train_set, eval_method.val_set
         )
         score = rating_eval(model, [rmse], eval_method.val_set)[0][0]
         secs = time.time() - t0
+        counters["t_fit"] += secs
         cache[k] = score
         _append_cache(cache_path, params, score, secs)
         if verbose:
-            print(f"    [fit {secs:6.1f}s] {params} -> RMSE={score:.4f}")
+            avg = counters["t_fit"] / counters["fit"]
+            print(
+                f"      fit {counters['fit']}/{n_fits_max}  {secs:6.1f}s  "
+                f"RMSE={score:.4f}  (avg {avg:.1f}s/fit)   {params}"
+            )
         del model
         return score, False
 
@@ -88,19 +101,29 @@ def run_cd(base_model, order, defaults, eval_method, cache_path, verbose=True):
 
     # Baseline (all defaults) evaluated once.
     if verbose:
-        print(f"  Baseline: {current}")
+        print(f"  Baseline {current}")
     base_score, _ = evaluate(current)
     trace.append({"step": "baseline", "params": dict(current), "val_rmse": base_score})
+    if verbose:
+        print(f"  baseline val RMSE = {base_score:.4f}")
 
-    for param, values in order:
+    for step, (param, values) in enumerate(order, 1):
         if verbose:
-            print(f"  Sweeping '{param}' over {values} (others locked)")
+            locked = {k: current[k] for k in current if k != param}
+            print(
+                f"\n  ── step {step}/{len(order)}: sweep '{param}' over {values} "
+                f"(locked: {locked}) ──"
+            )
         best_val, best_score = current[param], None
         for v in values:
             cand = dict(current, **{param: v})
             score, _ = evaluate(cand)
-            if best_score is None or score < best_score:
+            better = best_score is None or score < best_score
+            if better:
                 best_score, best_val = score, v
+            if verbose:
+                mark = " *best" if better else ""
+                print(f"      {param}={v}: RMSE={score:.4f}{mark}")
         current[param] = best_val
         trace.append(
             {
@@ -111,8 +134,13 @@ def run_cd(base_model, order, defaults, eval_method, cache_path, verbose=True):
             }
         )
         if verbose:
-            print(f"  -> locked {param}={best_val} (RMSE={best_score:.4f})")
+            print(f"  → locked {param}={best_val}  (val RMSE={best_score:.4f})")
 
+    if verbose:
+        print(
+            f"\n  coordinate descent done: {counters['fit']} fits, "
+            f"{time.time() - t_start:.0f}s total"
+        )
     return current, trace
 
 

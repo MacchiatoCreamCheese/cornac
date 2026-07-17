@@ -88,12 +88,14 @@ def build_w2v_matrix(vocab, path=None, emb_type="word2vec", word_dim=300, seed=N
     return matrix, n_oov
 
 
-def build_doc_matrices(review_text, num_users, num_items, max_doc_length):
-    """Build per-user and per-item document token-id matrices.
+def build_doc_matrices(review_text, num_users, num_items, max_doc_length, pad_id=None):
+    """Build per-user and per-item document token-id matrices *and word masks*.
 
-    Reproduces iRev's ``userDoc2Index``/``itemDoc2Index``: for every user (item),
-    concatenate the token sequences of all of its reviews into a single document,
-    then truncate/zero-pad to ``max_doc_length``.
+    Reproduces iRev's ``userDoc2Index``/``itemDoc2Index`` and CARP's
+    ``ExtractData.load_reviews``: for every user (item), concatenate the token
+    sequences of all of its reviews into a single document, truncate/pad to
+    ``max_doc_length``, and return a companion float mask that is ``1.0`` on the
+    real token positions and ``0.0`` on the padding positions.
 
     Parameters
     ----------
@@ -105,17 +107,26 @@ def build_doc_matrices(review_text, num_users, num_items, max_doc_length):
         Number of users/items in the training set.
 
     max_doc_length: int
-        Fixed document length (tokens); iRev uses 500.
+        Fixed document length (tokens); CARP uses 300.
+
+    pad_id: int, optional, default: None
+        Token id used to pad short documents. CARP appends a dedicated zero
+        "padding embedding" row at index ``vocab_size``; passing that index keeps
+        padded positions pointing at the zero row. If ``None``, pads with 0.
 
     Returns
     -------
-    user_doc, item_doc: numpy.ndarray of shape (num_users, L) / (num_items, L)
-        Integer token-id matrices, zero-padded at the end.
+    user_doc, item_doc: numpy.ndarray (num_users, L) / (num_items, L)
+        Integer token-id matrices, padded at the end.
+    user_mask, item_mask: numpy.ndarray (num_users, L) / (num_items, L)
+        Float32 masks, 1.0 for real tokens and 0.0 for padding.
     """
     sequences = review_text.sequences
+    fill = 0 if pad_id is None else int(pad_id)
 
     def _docs(review_group, n):
-        docs = np.zeros((n, max_doc_length), dtype="int64")
+        docs = np.full((n, max_doc_length), fill, dtype="int64")
+        masks = np.zeros((n, max_doc_length), dtype="float32")
         for idx in range(n):
             review_ids = review_group.get(idx, {})
             doc = []
@@ -125,8 +136,9 @@ def build_doc_matrices(review_text, num_users, num_items, max_doc_length):
                     break
             doc = doc[:max_doc_length]
             docs[idx, : len(doc)] = doc
-        return docs
+            masks[idx, : len(doc)] = 1.0
+        return docs, masks
 
-    user_doc = _docs(review_text.user_review, num_users)
-    item_doc = _docs(review_text.item_review, num_items)
-    return user_doc, item_doc
+    user_doc, user_mask = _docs(review_text.user_review, num_users)
+    item_doc, item_mask = _docs(review_text.item_review, num_items)
+    return user_doc, item_doc, user_mask, item_mask

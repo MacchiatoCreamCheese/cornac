@@ -12,17 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ============================================================================
-"""PyTorch network for DAML.
-
-Ported from the iRev benchmark implementation of
+"""PyTorch network for DAML (paper-faithful head/fusion).
 
     Liu, D., Li, J., Du, B., Chang, J., & Gao, R. (2019).
     DAML: Dual Attention Mutual Learning between Ratings and Reviews for
     Item Recommendation. KDD 2019.
 
-The iRev module returned two stacked (document + id) features per user/item that
-a shared FusionLayer concatenated before an LFM head. Those steps are folded in
-here so the module maps ``(uids, iids, user_doc, item_doc)`` to a scalar rating.
+The dual local + mutual attention review encoder (Eq. 5-13) is unchanged. The
+iRev benchmark ran the review-rec framework's *default* head/fusion (concatenate
+the doc & id features, then a Latent Factor Model), which is not what the paper
+specifies. This module instead follows the paper (and the authors-adjacent
+Neu-Review-Rec reference): fuse the review feature and the id feature by
+**addition** per side (Eq. 15), concatenate user|item (Eq. 16), and predict with
+a **Neural Factorization Machine** head (Eq. 17-19).
 """
 
 import numpy as np
@@ -31,21 +33,33 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class LFM(nn.Module):
-    """Latent Factor Model rating head (ported from iRev framework)."""
+class NFM(nn.Module):
+    """Neural Factorization Machine rating head (DAML Eq. 17-19).
 
-    def __init__(self, dim, num_users, num_items):
+    Same definition as the Neu-Review-Rec reference / Cornac MAN's NFM: a linear
+    FM part plus a bilinear interaction fed through a small MLP.
+    """
+
+    def __init__(self, dim, hidden=16):
         super().__init__()
         self.fc = nn.Linear(dim, 1)
-        self.b_users = nn.Parameter(torch.randn(num_users, 1))
-        self.b_items = nn.Parameter(torch.randn(num_items, 1))
+        self.fm_V = nn.Parameter(torch.randn(hidden, dim))
+        self.mlp = nn.Linear(hidden, hidden)
+        self.h = nn.Linear(hidden, 1, bias=False)
+        self.dropout = nn.Dropout(0.5)
         nn.init.uniform_(self.fc.weight, -0.1, 0.1)
-        nn.init.uniform_(self.fc.bias, 0.5, 1.5)
-        nn.init.uniform_(self.b_users, 0.5, 1.5)
-        nn.init.uniform_(self.b_items, 0.5, 1.5)
+        nn.init.constant_(self.fc.bias, 0.1)
+        nn.init.uniform_(self.fm_V, -0.1, 0.1)
+        nn.init.uniform_(self.h.weight, -0.1, 0.1)
 
-    def forward(self, feature, user_id, item_id):
-        return self.fc(feature) + self.b_users[user_id] + self.b_items[item_id]
+    def forward(self, x):
+        fm_linear = self.fc(x)
+        inter_1 = torch.mm(x, self.fm_V.t()).pow(2)
+        inter_2 = torch.mm(x.pow(2), self.fm_V.pow(2).t())
+        bilinear = 0.5 * (inter_1 - inter_2)
+        out = F.relu(self.mlp(bilinear))
+        out = self.dropout(out)
+        return self.h(out) + fm_linear
 
 
 class DAMLModel(nn.Module):
@@ -83,8 +97,9 @@ class DAMLModel(nn.Module):
         self.iid_embedding = nn.Embedding(num_items + 2, id_embedding_size)
 
         self.dropout = nn.Dropout(dropout_rate)
-        # num_fea=2 features, fused by concatenation for user & item -> 4 * id.
-        self.predict = LFM(id_embedding_size * 4, num_users, num_items)
+        # Paper-faithful fusion: review + id features added per side (Eq. 15), then
+        # user|item concatenated (Eq. 16) -> 2 * id, into the NFM head (Eq. 17-19).
+        self.predict = NFM(id_embedding_size * 2)
 
         self._reset_parameters()
         self._init_word_embeddings(pretrained_word_embeddings)
@@ -157,9 +172,10 @@ class DAMLModel(nn.Module):
         uid_emb = self.uid_embedding(uids)
         iid_emb = self.iid_embedding(iids)
 
-        # num_fea=2: stack doc feature with id embedding, then FusionLayer(cat).
-        user_fea = torch.cat([user_doc_fea, uid_emb], dim=1)  # (bs, 2*id)
-        item_fea = torch.cat([item_doc_fea, iid_emb], dim=1)  # (bs, 2*id)
-        fused = torch.cat([user_fea, item_fea], dim=1)  # (bs, 4*id)
+        # Additive fusion of the review feature and the id feature per side (Eq. 15),
+        # then concatenate user|item (Eq. 16).
+        user_fea = user_doc_fea + uid_emb  # (bs, id)
+        item_fea = item_doc_fea + iid_emb  # (bs, id)
+        fused = torch.cat([user_fea, item_fea], dim=1)  # (bs, 2*id)
         fused = self.dropout(fused)
-        return self.predict(fused, uids, iids).squeeze(1)
+        return self.predict(fused).squeeze(1)  # NFM head

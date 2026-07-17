@@ -140,6 +140,11 @@ else:
 
 extensions = [
     Extension(
+        name="cornac.models.alfm._alfm",
+        sources=["cornac/models/alfm/_alfm.pyx"],
+        include_dirs=[np.get_include()],
+    ),
+    Extension(
         name="cornac.models.c2pf.c2pf",
         sources=[
             "cornac/models/c2pf/cython/c2pf.pyx",

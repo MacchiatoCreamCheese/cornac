@@ -17,6 +17,8 @@ import csv
 import json
 import os
 
+import numpy as np
+
 from . import datasets
 from . import search_spaces
 from .coordinate_descent import run_cd, final_eval
@@ -75,16 +77,44 @@ def tune_one(
         base.init_params["pretrained_word_embeddings"] = mat
         print(f"  word2vec: {n_oov}/{vocab.size} OOV (loaded once, cached in memory)")
 
-    # ALFM: the LDA topics depend only on the docs + n_topics (pinned), not on any
-    # swept param, so build them ONCE per dataset and reuse across all candidates.
+    # ALFM: the ATM topic model depends only on the docs + (num_aspects, n_topics),
+    # not on num_factors. Precompute it ONCE per distinct n_topics value in the sweep
+    # (num_aspects is pinned) and inject each under its atm key, so the coordinate
+    # descent reuses them across all factor candidates instead of refitting Gibbs.
+    # Each fitted ATM (~15 min of Gibbs on a full dataset) is persisted to disk
+    # immediately, so an interrupted sweep never recomputes finished topic models.
     if model_name == "ALFM":
-        print("  fitting LDA topics once (reused across candidates)...")
-        ut, it = base._build_topics(eval_method.train_set)
-        base.init_params["user_topics"] = ut
-        base.init_params["item_topics"] = it
+        order = dict(search_spaces.SPACES["ALFM"]["order"])
+        k_values = sorted(set(order.get("n_topics", [])) | {base.n_topics})
+        atm_dir = os.path.join(out_dir, "atm_cache")
+        os.makedirs(atm_dir, exist_ok=True)
+        print(f"  precomputing ATM for K in {k_values} (disk-cached in {atm_dir})...")
+        orig_k = base.n_topics
+        for K in k_values:
+            base.n_topics = K
+            # Cache key: everything the ATM depends on besides the docs themselves
+            # (dataset dir + max_train + seed pin the docs; A/K/tm_iterations the fit).
+            fname = "atm_A%d_K%d_it%d_mt%s_seed%s.npz" % (
+                base.num_aspects, K, base.tm_iterations, max_train, seed
+            )
+            fpath = os.path.join(atm_dir, fname)
+            if os.path.exists(fpath):
+                data = np.load(fpath)
+                atm = {k: data[k] for k in data.files}
+                print(f"    K={K}: loaded from cache ({fname})")
+            else:
+                atm = base.build_atm(eval_method.train_set)
+                np.savez_compressed(fpath, **atm)  # persist immediately
+                print(f"    K={K}: fitted and cached ({fname})")
+            base.init_params[base._atm_key()] = atm
+        base.n_topics = orig_k
 
     order = search_spaces.SPACES[model_name]["order"]
     defaults = search_spaces.defaults(model_name)
+    if verbose:
+        print(f"  epochs/fit={epochs}  search space:")
+        for p, vals in order:
+            print(f"    {p}: {vals}")
 
     os.makedirs(out_dir, exist_ok=True)
     cache_path = os.path.join(out_dir, "cd_log.jsonl")

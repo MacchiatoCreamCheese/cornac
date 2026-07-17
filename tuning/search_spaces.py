@@ -34,59 +34,93 @@ _TEXT_FIXED = {
 # in "fixed" (they equal the constructor default) rather than swept.
 SPACES = {
     "CARP": {
-        # Pinned to CARP-paper window c=3 and iRev id/filters/batch.
+        # Faithful CARP (official https://github.com/WHUIR/CARP). Pinned to the
+        # paper/official defaults; sweeps the four knobs the paper itself ablates.
+        # Note: CARP no longer has id_embedding_size/weight_decay/dropout_rate --
+        # it uses RMSProp (no decay), DropConnect keep-prob, and scalar user/item
+        # bias instead of id embeddings. max_doc_length is 300 (not the shared 500).
         "fixed": dict(
-            _TEXT_FIXED,
+            embedding_size=300,
+            pretrained_w2v_type="word2vec",
+            max_doc_length=300,
+            n_filters=50,
             kernel_size=3,
-            id_embedding_size=32,
-            n_filters=100,
-            batch_size=128,
+            itr_self_attn=2,
+            lambda_1=0.8,
+            rating_threshold=3.0,
+            dropout_keep_prob=0.9,
+            batch_size=100,
+            learning_rate=1e-3,
         ),
-        "order": [
-            ("learning_rate", [1e-3, 2e-3]),   # 1e-3 = CARP paper; 2e-3 = survey/iRev
-            ("dropout_rate", [0.1, 0.5]),      # 0.1 = CARP paper (keep-prob 0.9); 0.5 = survey/iRev
-            ("weight_decay", [1e-4, 1e-3]),    # survey T9
+        "order": [  # coordinate descent, constructor default listed first for cache de-dup
+            ("num_aspect", [5, 3, 7, 9]),                # M -- CARP Table 3
+            ("gama", [0.5, 0.1, 0.3, 0.7, 1.0]),         # lambda -- CARP Fig 3(b)
+            ("itr_routing", [3, 1, 2, 4]),               # tau -- CARP Table 4
+            ("latent_dim", [25, 50, 100]),               # k -- paper "optimal in [25,100]"
         ],
     },
     "DAML": {
-        # kernel fixed 3 (paper), n_filters=100 (survey, no alternative) -> pinned.
+        # Faithful DAML (NFM head + additive review/id fusion). Grid grounded in the
+        # DAML paper's own tuning ranges (p.6-7) and the Neu-Review-Rec reference config.
+        # kernel_size=3 (paper "sliding window 3") and n_filters=100 (paper "100 kernels";
+        # Neu-Review-Rec filters_num=100) are pinned. Each order lists the constructor
+        # default first so the tuner cache de-dups the baseline.
         "fixed": dict(_TEXT_FIXED, kernel_size=3, n_filters=100),
         "order": [
-            ("learning_rate", [1e-3, 2e-3]),   # survey T9 (paper's 1e-5/2e-5 excluded; see MD)
-            ("dropout_rate", [0.2, 0.5]),      # 0.2 DAML paper, 0.5 survey/iRev
-            ("id_embedding_size", [8, 32]),    # 8 DAML paper, 32 paper/survey
-            ("weight_decay", [1e-4, 1e-3]),    # survey T9
-            ("batch_size", [8, 32, 64, 128]),  # 8 iRev; 32/64/128 survey (large may OOM)
+            # paper tunes lr in {1e-5,2e-5,1e-3,2e-3}; Neu-Review-Rec uses 2e-3. The 1e-5/2e-5
+            # end needs far more epochs than the benchmark budget, so keep the practical subset.
+            ("learning_rate", [2e-3, 1e-3]),
+            # paper searches dropout in {0.1,0.2,0.3,0.4} (DAML uses 0.2); Neu-Review-Rec 0.5.
+            ("dropout_rate", [0.5, 0.2, 0.1, 0.3, 0.4]),
+            # paper tunes latent dim in {8,16,32,64,128} (DAML uses 8); Neu-Review-Rec/iRev 32.
+            ("id_embedding_size", [32, 8, 16, 64, 128]),
+            # paper reg {0.001,0.01,...}; Neu-Review-Rec weight_decay 1e-3 (higher values blow up Adam WD).
+            ("weight_decay", [1e-3, 1e-2]),
+            # paper batch {50,100,150,200}; Neu-Review-Rec 128; smaller kept for the O(doc_len^2) memory.
+            ("batch_size", [8, 32, 64, 128]),
         ],
     },
     "MAN": {
-        # MAN paper gave no numeric hyperparameters; dropout/id/filters/fc_dim have
-        # only a single sourced value (survey/iRev) -> pinned.
-        # kernel_size=3 (sliding window) and batch_size=128 pinned per user request.
-        # NOTE: iRev's train.sh ran MAN with batch_size=32, not 128.
+        # Faithful MAN (main+auxiliary nets, 3-step distillation; implemented from the
+        # paper -- no official repo). Grid grounded in the paper's Sec. 5.4: MAN's own
+        # values are pinned (batch 128, gamma/fc_dim 50, 4 heads, FF 128, kernel 3,
+        # lambda/weight_decay 1e-3, RT length 50); the sweep covers the knobs the paper
+        # itself searched. Word embeddings: shared 300-dim pipeline vectors for now
+        # (paper states 64-dim pretrained -- revisit later). Constructor default first.
         "fixed": dict(
             _TEXT_FIXED,
-            dropout_rate=0.5,
-            id_embedding_size=32,
-            n_filters=100,
-            fc_dim=32,
+            max_doc_length=1000,  # [MAN 5.4] max input text 1,000 (overrides _TEXT_FIXED's 500)
             kernel_size=3,
+            fc_dim=50,
+            att_hidden=64,
+            n_heads=4,
+            ff_dim=128,
+            max_rt_length=50,
             batch_size=128,
+            weight_decay=1e-3,
         ),
         "order": [
-            ("learning_rate", [1e-3, 2e-3]),   # survey T9
-            ("weight_decay", [1e-4, 1e-3]),    # survey T9
+            ("learning_rate", [6e-3, 1e-3]),               # paper searched {1e-5,6e-5,1e-3,6e-3}; MAN uses 6e-3
+            ("dropout_rate", [0.5, 0.1, 0.2, 0.3, 0.4]),   # paper searched {0.1..0.5}; MAN uses 0.5
+            ("id_embedding_size", [32, 8, 16, 64]),        # paper searched {8,16,32,64}; MAN uses 32
+            ("n_filters", [100, 50, 150, 200]),            # paper searched {50,100,150,200}; MAN uses 100
         ],
     },
     "ALFM": {
-        # No word embeddings. dropout/n_topics/id have only a single sourced value
-        # (survey/iRev) -> pinned. (ALFM paper's f=K=5 maps to latent dim, not our
-        # LDA n_topics; iRev used LDA-32.)
-        "fixed": {"lda_max_iter": 10, "dropout_rate": 0.5, "n_topics": 32, "id_embedding_size": 32},
+        # Faithful ALFM (official Java, WWW'18): two-stage ATM topic model + aspect-aware
+        # latent-factor SGD. No word embeddings. Sweeps the paper-ablated knobs f and K;
+        # Dirichlet priors, regs, aspect count, and topic-model iterations are pinned to the
+        # official values. num_factors is swept before n_topics so all f candidates reuse a
+        # single precomputed topic model (only a K change forces an ATM refit).
+        "fixed": dict(
+            num_aspects=5,
+            alpha=0.1, beta=0.01, gamma=0.5,
+            tm_iterations=120, tm_begin_save=100, tm_save_step=10,
+            learn_rate=0.01, reg=0.5, weight_reg=0.01,
+        ),
         "order": [
-            ("learning_rate", [1e-3, 2e-3]),   # survey T9
-            ("weight_decay", [1e-4, 1e-3]),    # survey T9
-            ("batch_size", [32, 64, 128]),     # survey T9
+            ("num_factors", [5, 10, 15, 20, 25]),  # f -- ALFM Fig 2/3
+            ("n_topics",    [5, 10, 15, 20, 25]),  # K -- ALFM Fig 2/3
         ],
     },
 }
