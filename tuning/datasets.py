@@ -18,9 +18,20 @@ DATASETS = {
     "cellphone": "Cell_Phones_and_Accessories",
 }
 
-# This file lives at <repo>/cornac/tuning/; data is at <repo>/cornac/data/amazon_2023
+# This file lives at <repo>/tuning/; by default data is at <repo>/data/amazon_2023.
+# Override for other machines/remotes with the CORNAC_TUNING_DATA env var or, from the
+# CLI runners, --data-root (both should point at the amazon_2023 dir that contains
+# benchmark/5core/... and <dataset>/review.txt).
 _HERE = os.path.dirname(os.path.abspath(__file__))
-DATA_ROOT = os.path.join(_HERE, "..", "data", "amazon_2023")
+_DEFAULT_DATA_ROOT = os.path.join(_HERE, "..", "data", "amazon_2023")
+DATA_ROOT = os.environ.get("CORNAC_TUNING_DATA", _DEFAULT_DATA_ROOT)
+
+
+def set_data_root(path):
+    """Point the loaders at a different amazon_2023 data dir (CLI --data-root)."""
+    global DATA_ROOT
+    if path:
+        DATA_ROOT = os.path.abspath(os.path.expanduser(path))
 
 
 def _split_path(name, split):

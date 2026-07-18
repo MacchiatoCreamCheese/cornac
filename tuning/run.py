@@ -178,6 +178,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", choices=MODELS, help="Model to tune.")
     ap.add_argument("--dataset", choices=list(datasets.DATASETS), help="Dataset.")
+    ap.add_argument("--data-root", default=None,
+                    help="amazon_2023 data dir (overrides CORNAC_TUNING_DATA / the "
+                    "repo-relative default). Use on remotes where data lives elsewhere.")
     ap.add_argument("--all", action="store_true", help="Run all models x all datasets.")
     ap.add_argument("--epochs", type=int, default=10, help="Epochs per search fit (iRev default=10).")
     ap.add_argument(
@@ -205,6 +208,8 @@ def main():
         help="Re-run combos even if a completed best.json already exists.",
     )
     args = ap.parse_args()
+
+    datasets.set_data_root(args.data_root)
 
     verbose = not args.quiet
     if args.all:

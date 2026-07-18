@@ -106,6 +106,9 @@ def _prepare(model_name, base, eval_method, dataset, max_train, seed):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dataset", default="musical", choices=list(datasets.DATASETS))
+    ap.add_argument("--data-root", default=None,
+                    help="amazon_2023 data dir (overrides CORNAC_TUNING_DATA / the "
+                    "repo-relative default). Use on remotes where data lives elsewhere.")
     ap.add_argument("--models", default=",".join(DEFAULT_ORDER),
                     help="Comma-separated subset of ALFM,CARP,DAML,MAN.")
     ap.add_argument("--epochs", type=int, default=10,
@@ -125,6 +128,8 @@ def main():
         "Ints/floats parsed automatically. Use with a single --models entry.",
     )
     args = ap.parse_args()
+
+    datasets.set_data_root(args.data_root)
 
     overrides = {}
     if args.set:
