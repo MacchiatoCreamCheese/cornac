@@ -118,6 +118,10 @@ def main():
     ap.add_argument("--seed", type=int, default=123)
     ap.add_argument("--w2v", default=None,
                     help="Pretrained word2vec path (default: search_spaces.DEFAULT_W2V).")
+    ap.add_argument("--allow-random-embeddings", action="store_true",
+                    help="Permit random word embeddings when the w2v file is missing "
+                    "(won't reproduce paper numbers; for quick smokes only). Otherwise "
+                    "a missing file errors.")
     ap.add_argument("--out", default=None,
                     help="Output JSONL (default: tuning/results/best_run_<dataset>.jsonl).")
     ap.add_argument("--force", action="store_true", help="Re-run already-logged models.")
@@ -181,7 +185,7 @@ def main():
         print(f"\n=== {name}  epochs={args.epochs}  picks={picks} ===")
         base = search_spaces.build_base_model(
             name, max_iter=args.epochs, seed=args.seed, w2v_path=args.w2v,
-            verbose=verbose,
+            verbose=verbose, allow_random_embeddings=args.allow_random_embeddings,
         )
         _prepare(name, base, eval_method, args.dataset, args.max_train, args.seed)
         model = base.clone(picks)

@@ -31,7 +31,7 @@ MODELS = ["ALFM", "CARP", "DAML", "MAN"]
 
 def tune_one(
     model_name, dataset, epochs, final_epochs, max_train, seed, w2v, verbose,
-    force=False,
+    force=False, allow_random_embeddings=False,
 ):
     print(f"\n===== {model_name} on {dataset} =====")
 
@@ -57,7 +57,8 @@ def tune_one(
     )
 
     base = search_spaces.build_base_model(
-        model_name, max_iter=epochs, seed=seed, w2v_path=w2v, verbose=verbose
+        model_name, max_iter=epochs, seed=seed, w2v_path=w2v, verbose=verbose,
+        allow_random_embeddings=allow_random_embeddings,
     )
 
     # Precompute the pretrained embedding matrix ONCE (vocab is fixed per dataset)
@@ -201,6 +202,12 @@ def main():
         default=None,
         help="Path to pretrained word2vec (default: search_spaces.DEFAULT_W2V).",
     )
+    ap.add_argument(
+        "--allow-random-embeddings",
+        action="store_true",
+        help="Permit random word embeddings when the w2v file is missing (won't "
+        "reproduce paper numbers; for quick smokes only). Otherwise a missing file errors.",
+    )
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument(
         "--force",
@@ -234,6 +241,7 @@ def main():
             w2v=args.w2v,
             verbose=verbose,
             force=args.force,
+            allow_random_embeddings=args.allow_random_embeddings,
         )
 
 

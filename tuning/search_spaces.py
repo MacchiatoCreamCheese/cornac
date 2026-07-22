@@ -15,9 +15,10 @@ Edit the grids below to change the search.
 # (CARP/DAML/MAN). ALFM uses LDA topics and ignores it. Overridable via CLI.
 import os
 
-# This file lives at <repo>/cornac/tuning/; the w2v file is at <repo>/GoogleNews-...
+# This file lives at <repo>/tuning/; keep the w2v file in the cornac repo root so it is
+# picked up automatically: <repo>/GoogleNews-vectors-negative300.bin.gz (".." == repo root).
 _HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_W2V = os.path.join(_HERE, "..", "..", "GoogleNews-vectors-negative300.bin.gz")
+DEFAULT_W2V = os.path.join(_HERE, "..", "GoogleNews-vectors-negative300.bin.gz")
 
 
 # Context shared by all word-based models during the search.
@@ -129,8 +130,17 @@ SPACES = {
 _WORD_BASED = {"CARP", "DAML", "MAN"}
 
 
-def build_base_model(model_name, max_iter, seed=123, w2v_path=None, verbose=False):
-    """Instantiate a base model with fixed context wired in (defaults elsewhere)."""
+def build_base_model(
+    model_name, max_iter, seed=123, w2v_path=None, verbose=False,
+    allow_random_embeddings=False,
+):
+    """Instantiate a base model with fixed context wired in (defaults elsewhere).
+
+    For the word-based models (CARP/DAML/MAN) the pretrained word2vec file is required:
+    if it is missing we raise instead of silently falling back to random embeddings
+    (which quietly ruins results). Pass ``allow_random_embeddings=True`` to opt out
+    (e.g. quick smokes on a machine without the file).
+    """
     import cornac.models as M
 
     cls = getattr(M, model_name)
@@ -139,7 +149,18 @@ def build_base_model(model_name, max_iter, seed=123, w2v_path=None, verbose=Fals
 
     if model_name in _WORD_BASED:
         path = w2v_path if w2v_path is not None else DEFAULT_W2V
-        kwargs["pretrained_w2v_path"] = path if os.path.exists(path) else None
+        if os.path.exists(path):
+            kwargs["pretrained_w2v_path"] = path
+        elif allow_random_embeddings:
+            kwargs["pretrained_w2v_path"] = None
+        else:
+            raise FileNotFoundError(
+                "Pretrained word2vec not found for %s at:\n  %s\n"
+                "Place GoogleNews-vectors-negative300.bin.gz in the cornac repo root, "
+                "or pass --w2v <path>. Random embeddings do NOT reproduce paper numbers; "
+                "pass --allow-random-embeddings to run anyway (e.g. quick smokes)."
+                % (model_name, os.path.abspath(path))
+            )
 
     return cls(**kwargs)
 
