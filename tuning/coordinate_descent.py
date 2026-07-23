@@ -82,7 +82,10 @@ def run_cd(base_model, order, defaults, eval_method, cache_path, verbose=True):
         model = base_model.clone(params).fit(
             eval_method.train_set, eval_method.val_set
         )
-        score = rating_eval(model, [rmse], eval_method.val_set)[0][0]
+        # Per-user averaged RMSE (user_based=True), matching the reported metric
+        # so coordinate descent selects the config that is best under the same
+        # aggregation the paper reports.
+        score = rating_eval(model, [rmse], eval_method.val_set, user_based=True)[0][0]
         secs = time.time() - t0
         counters["t_fit"] += secs
         cache[k] = score
@@ -167,7 +170,8 @@ def final_eval(
     if verbose:
         print(f"  Final refit on train, params={params}, epochs={model.max_iter}")
     model.fit(eval_method.train_set, eval_method.val_set)
-    scores = rating_eval(model, [RMSE(), MAE()], eval_method.test_set)[0]
+    # Per-user averaged metrics (user_based=True) -- the reported table numbers.
+    scores = rating_eval(model, [RMSE(), MAE()], eval_method.test_set, user_based=True)[0]
     result = {"test_rmse": scores[0], "test_mae": scores[1]}
 
     if save_dir is not None:
